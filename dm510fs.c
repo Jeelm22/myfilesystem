@@ -3,12 +3,14 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include<stdbool.h>
 
 int dm510fs_getattr( const char *, struct stat * );
 int dm510fs_readdir( const char *, void *, fuse_fill_dir_t, off_t, struct fuse_file_info * );
 int dm510fs_open( const char *, struct fuse_file_info * );
 int dm510fs_read( const char *, char *, size_t, off_t, struct fuse_file_info * );
 int dm510fs_release(const char *path, struct fuse_file_info *fi);
+int dm510fs_mkdir(const char *path, mode_t mode);
 void* dm510fs_init();
 void dm510fs_destroy(void *private_data);
 /*
@@ -19,7 +21,7 @@ static struct fuse_operations dm510fs_oper = {
 	.getattr	= dm510fs_getattr,
 	.readdir	= dm510fs_readdir,
 	.mknod = NULL,
-	.mkdir = NULL,
+	.mkdir = dm510fs_mkdir,
 	.unlink = NULL,
 	.rmdir = NULL,
 	.truncate = NULL,
@@ -33,6 +35,36 @@ static struct fuse_operations dm510fs_oper = {
 	.destroy = dm510fs_destroy
 };
 
+#define MAX_DATA_IN_FILE 256
+#define MAX_PATH_LENGTH  256
+#define MAX_NAME_LENGTH  256
+#define MAX_INODES  4
+
+
+/* The Inode for the filesystem*/
+typedef struct Inode {
+	bool is_active;
+	bool is_dir;
+	char data[MAX_DATA_IN_FILE];
+	char path[MAX_PATH_LENGTH];
+	char name[MAX_NAME_LENGTH];
+	mode_t mode;
+	nlink_t nlink;
+	off_t size;
+} Inode;
+
+Inode filesystem[MAX_INODES];
+
+
+void debug_inode(int i) {
+	Inode inode = filesystem[i];
+
+	printf("=============================================\n");
+	printf("      Path: %s\n", inode.path);
+	printf("=============================================\n");
+}
+
+
 /*
  * Return file attributes.
  * The "stat" structure is described in detail in the stat(2) manual page.
@@ -41,21 +73,21 @@ static struct fuse_operations dm510fs_oper = {
  * This call is pretty much required for a usable filesystem.
 */
 int dm510fs_getattr( const char *path, struct stat *stbuf ) {
-	int res = 0;
 	printf("getattr: (path=%s)\n", path);
 
 	memset(stbuf, 0, sizeof(struct stat));
-	if( strcmp( path, "/" ) == 0 ) {
-		stbuf->st_mode = S_IFDIR | 0755;
-		stbuf->st_nlink = 2;
-	} else if( strcmp( path, "/hello" ) == 0 ) {
-		stbuf->st_mode = S_IFREG | 0777;
-		stbuf->st_nlink = 1;
-		stbuf->st_size = 12;
-	} else
-		res = -ENOENT;
+	for( int i = 0; i < MAX_INODES; i++) {
+		printf("===> %s  %s \n", path, filesystem[i].path);
+		if( filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0 ) {
+			printf("Found inode for path %s at location %i\n", path, i);
+			stbuf->st_mode = filesystem[i].mode;
+			stbuf->st_nlink = filesystem[i].nlink;
+			stbuf->st_size = filesystem[i].size;
+			return 0;
+		}
+	}
 
-	return res;
+	return -ENOENT;
 }
 
 /*
@@ -114,8 +146,39 @@ int dm510fs_open( const char *path, struct fuse_file_info *fi ) {
 */
 int dm510fs_read( const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi ) {
     printf("read: (path=%s)\n", path);
-	memcpy( buf, "Hello\n", 6 );
-	return 6;
+
+	for( int i = 0; i < MAX_INODES; i++) {
+		if( strcmp(filesystem[i].path, path) == 0 ) {
+			printf("Read: Found inode for path %s at location %i\n", path, i);
+			memcpy( buf, filesystem[i].data, filesystem[i].size );
+			return filesystem[i].size;
+		}
+	}
+	return 0;
+}
+
+
+/* Make directories - TODO */
+int dm510fs_mkdir(const char *path, mode_t mode) {
+	printf("mkdir: (path=%s)\n", path);
+
+	// Locate the first unused Inode in the filesystem
+	for( int i = 0; i < MAX_INODES; i++) {
+		if( filesystem[i].is_active == false ) {
+			printf("mkdir: Found unused inode for at location %i\n", i);
+			// Use that for the directory
+			filesystem[i].is_active = true;
+			filesystem[i].is_dir = true;
+			filesystem[i].mode = S_IFDIR | 0755;
+			filesystem[i].nlink = 2;
+			memcpy(filesystem[i].path, path, strlen(path)+1); 			
+
+			debug_inode(i);
+			break;
+		}
+	}
+
+	return 0;
 }
 
 /*
@@ -137,6 +200,29 @@ int dm510fs_release(const char *path, struct fuse_file_info *fi) {
  */
 void* dm510fs_init() {
     printf("init filesystem\n");
+
+	// Loop through all inodes - set them inactive
+	for( int i = 0; i < MAX_INODES; i++) {
+		filesystem[i].is_active = false;
+	}
+
+	// Add root inode 
+	filesystem[0].is_active = true;
+	filesystem[0].is_dir = true;
+	filesystem[0].mode = S_IFDIR | 0755;
+	filesystem[0].nlink = 2;
+	memcpy(filesystem[0].path, "/", 2); 
+
+	// Add inode for the hello file
+	filesystem[1].is_active = true;
+	filesystem[1].is_dir = false;
+	filesystem[1].mode = S_IFREG | 0777;
+	filesystem[1].nlink = 1;
+	filesystem[1].size = 12;
+	memcpy(filesystem[1].path, "/hello", 6);
+	memcpy(filesystem[1].data, "Hello World!", 13);
+
+
     return NULL;
 }
 
