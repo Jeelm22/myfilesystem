@@ -9,8 +9,11 @@ int dm510fs_getattr( const char *, struct stat * );
 int dm510fs_readdir( const char *, void *, fuse_fill_dir_t, off_t, struct fuse_file_info * );
 int dm510fs_open( const char *, struct fuse_file_info * );
 int dm510fs_read( const char *, char *, size_t, off_t, struct fuse_file_info * );
+int dm510fs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi);
 int dm510fs_release(const char *path, struct fuse_file_info *fi);
 int dm510fs_mkdir(const char *path, mode_t mode);
+int dm510fs_unlink(const char *path);
+int dm510fs_rmdir(const char *path);
 void* dm510fs_init();
 void dm510fs_destroy(void *private_data);
 /*
@@ -22,13 +25,13 @@ static struct fuse_operations dm510fs_oper = {
 	.readdir	= dm510fs_readdir,
 	.mknod = NULL,
 	.mkdir = dm510fs_mkdir,
-	.unlink = NULL,
-	.rmdir = NULL,
+	.unlink = dm510fs_unlink,
+	.rmdir = dm510fs_rmdir,
 	.truncate = NULL,
 	.open	= dm510fs_open,
 	.read	= dm510fs_read,
 	.release = dm510fs_release,
-	.write = NULL,
+	.write = dm510fs_write,
 	.rename = NULL,
 	.utime = NULL,
 	.init = dm510fs_init,
@@ -113,19 +116,31 @@ int dm510fs_getattr( const char *path, struct stat *stbuf ) {
  * It's also important to note that readdir can return errors in a number of instances;
  * in particular it can return -EBADF if the file handle is invalid, or -ENOENT if you use the path argument and the path doesn't exist.
 */
-int dm510fs_readdir( const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi ) {
-	(void) offset;
-	(void) fi;
-	printf("readdir: (path=%s)\n", path);
+int dm510fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
+    (void) offset; // Offset is handled by FUSE itself
+    (void) fi;     // Not used
 
-	if(strcmp(path, "/") != 0)
-		return -ENOENT;
+    printf("readdir: (path=%s)\n", path);
 
-	filler(buf, ".", NULL, 0);
-	filler(buf, "..", NULL, 0);
-	filler(buf, "hello", NULL, 0);
+    // Check if the path is the root directory
+    if (strcmp(path, "/") != 0) {
+        return -ENOENT;
+    }
 
-	return 0;
+    filler(buf, ".", NULL, 0);  // Current directory
+    filler(buf, "..", NULL, 0); // Parent directory
+
+    // Loop through all inodes and list active files and directories
+    for (int i = 0; i < MAX_INODES; i++) {
+        if (filesystem[i].is_active) {
+            if (filesystem[i].path[0] == '/' && strcmp(filesystem[i].path, "/") != 0) { // Avoid listing root itself
+                const char* name = filesystem[i].path + 1; // Skip the leading '/'
+                filler(buf, name, NULL, 0);
+            }
+        }
+    }
+
+    return 0;
 }
 
 /*
@@ -158,6 +173,37 @@ int dm510fs_read( const char *path, char *buf, size_t size, off_t offset, struct
 }
 
 
+int dm510fs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
+    (void) fi; // If you're not using file handles.
+
+    // Find the inode corresponding to the path.
+    for (int i = 0; i < MAX_INODES; i++) {
+        if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
+            // Make sure we don't write past the file's maximum data size.
+            if (offset + size > MAX_DATA_IN_FILE) {
+                size = MAX_DATA_IN_FILE - offset;
+            }
+            if (size == 0) {
+                return -EFBIG; // File too big.
+            }
+
+            // Perform the write operation.
+            memcpy(filesystem[i].data + offset, buf, size);
+
+            // Update the size of the file.
+            if (offset + size > filesystem[i].size) {
+                filesystem[i].size = offset + size;
+            }
+
+            // Return the number of bytes written.
+            return size;
+        }
+    }
+
+    // If the file was not found, return an error.
+    return -ENOENT;
+}
+
 /* Make directories - TODO */
 int dm510fs_mkdir(const char *path, mode_t mode) {
 	printf("mkdir: (path=%s)\n", path);
@@ -171,7 +217,7 @@ int dm510fs_mkdir(const char *path, mode_t mode) {
 			filesystem[i].is_dir = true;
 			filesystem[i].mode = S_IFDIR | 0755;
 			filesystem[i].nlink = 2;
-			memcpy(filesystem[i].path, path, strlen(path)+1); 			
+			memcpy(filesystem[i].path, path, strlen(path)+1); 	
 
 			debug_inode(i);
 			break;
@@ -179,6 +225,72 @@ int dm510fs_mkdir(const char *path, mode_t mode) {
 	}
 
 	return 0;
+}
+
+/*
+ * Remove a file.
+ */
+int dm510fs_unlink(const char *path) {
+    printf("unlink: (path=%s)\n", path);
+
+    // Loop through the inode array to find and remove the file
+    for (int i = 0; i < MAX_INODES; i++) {
+        if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
+            // File found, now deactivate the inode
+            filesystem[i].is_active = false;
+            filesystem[i].size = 0;  // Optionally reset the size
+            memset(filesystem[i].data, 0, MAX_DATA_IN_FILE);  // Optionally clear the data
+
+            printf("Unlink: Successfully removed %s at location %i\n", path, i);
+            return 0;  // Success
+        }
+    }
+
+    // If we finish the loop without finding the file, it doesn't exist
+    printf("Unlink: File %s not found\n", path);
+    return -ENOENT;  // No such file
+}
+
+/*
+ * Remove a directory.
+ */
+int dm510fs_rmdir(const char *path) {
+    printf("rmdir: (path=%s)\n", path);
+
+    // First, check if the directory is at the root and is "/", which should not be removed
+    if (strcmp(path, "/") == 0) {
+        printf("Cannot remove root directory\n");
+        return -EBUSY; // or return -EPERM
+    }
+
+    // Locate the inode representing the directory
+    for (int i = 0; i < MAX_INODES; i++) {
+        if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0 && filesystem[i].is_dir) {
+            // Check if the directory is empty
+            bool is_empty = true;
+            for (int j = 0; j < MAX_INODES; j++) {
+                if (filesystem[j].is_active && strncmp(filesystem[j].path, path, strlen(path)) == 0 && j != i) {
+                    is_empty = false;
+                    break;
+                }
+            }
+
+            if (!is_empty) {
+                printf("Directory is not empty\n");
+                return -ENOTEMPTY; // Directory not empty
+            }
+
+            // If the directory is empty, deactivate the inode
+            filesystem[i].is_active = false;
+            memset(&filesystem[i], 0, sizeof(Inode)); // Optional: Clear the inode data
+            printf("Directory removed successfully\n");
+            return 0; // Success
+        }
+    }
+
+    // If no matching directory is found
+    printf("No such directory\n");
+    return -ENOENT; // No such directory
 }
 
 /*
