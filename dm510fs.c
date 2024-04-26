@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include<stdbool.h>
+#include <time.h>
+#include <utime.h>
 
 int dm510fs_getattr( const char *, struct stat * );
 int dm510fs_readdir( const char *, void *, fuse_fill_dir_t, off_t, struct fuse_file_info * );
@@ -14,6 +16,8 @@ int dm510fs_release(const char *path, struct fuse_file_info *fi);
 int dm510fs_mkdir(const char *path, mode_t mode);
 int dm510fs_unlink(const char *path);
 int dm510fs_rmdir(const char *path);
+int dm510fs_utime(const char *path, struct utimbuf *ubuf);
+int dm510fs_rename(const char *oldpath, const char *newpath);
 void* dm510fs_init();
 void dm510fs_destroy(void *private_data);
 /*
@@ -32,8 +36,8 @@ static struct fuse_operations dm510fs_oper = {
 	.read	= dm510fs_read,
 	.release = dm510fs_release,
 	.write = dm510fs_write,
-	.rename = NULL,
-	.utime = NULL,
+	.rename = dm510fs_rename,
+	.utime = dm510fs_utime,
 	.init = dm510fs_init,
 	.destroy = dm510fs_destroy
 };
@@ -54,6 +58,8 @@ typedef struct Inode {
 	mode_t mode;
 	nlink_t nlink;
 	off_t size;
+	time_t atime;
+	time_t mtime;
 } Inode;
 
 Inode filesystem[MAX_INODES];
@@ -291,6 +297,78 @@ int dm510fs_rmdir(const char *path) {
     // If no matching directory is found
     printf("No such directory\n");
     return -ENOENT; // No such directory
+}
+
+/*
+ * Rename a file or directory.
+ */
+int dm510fs_rename(const char *oldpath, const char *newpath) {
+    printf("rename: (oldpath=%s, newpath=%s)\n", oldpath, newpath);
+
+    int i, target_idx = -1;
+
+    // Check if the new path already exists
+    for (i = 0; i < MAX_INODES; i++) {
+        if (filesystem[i].is_active && strcmp(filesystem[i].path, newpath) == 0) {
+            target_idx = i;
+            break;
+        }
+    }
+
+    // Find the inode for the old path
+    for (i = 0; i < MAX_INODES; i++) {
+        if (filesystem[i].is_active && strcmp(filesystem[i].path, oldpath) == 0) {
+            // If the new path exists and is a non-empty directory, return error
+            if (target_idx != -1 && filesystem[target_idx].is_dir) {
+                printf("rename: Target is a non-empty directory\n");
+                return -ENOTEMPTY;
+            }
+
+            // If it's an existing file, deactivate it
+            if (target_idx != -1) {
+                filesystem[target_idx].is_active = false;
+            }
+
+            // Update the inode with the new path
+            strncpy(filesystem[i].path, newpath, MAX_PATH_LENGTH);
+            printf("rename: Successfully renamed %s to %s\n", oldpath, newpath);
+            return 0;
+        }
+    }
+
+    printf("rename: Old path does not exist\n");
+    return -ENOENT;
+}
+
+/*
+ * Update the access and modification times of a file with nanosecond precision.
+ */
+int dm510fs_utime(const char *path, struct utimbuf *ubuf) {
+    fprintf(stderr, "utime: (path=%s)\n", path);
+
+    // Find the inode corresponding to the path
+    for (int i = 0; i < MAX_INODES; i++) {
+        if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
+            // Update the inode's timestamps
+            time_t now = time(NULL); // Get current time
+
+            if (ubuf != NULL) {
+                // If times are provided, update to those times
+                filesystem[i].atime = ubuf->actime;
+                filesystem[i].mtime = ubuf->modtime;
+            } else {
+                // If no times are provided, set to current time
+                filesystem[i].atime = now;
+                filesystem[i].mtime = now;
+            }
+
+            fprintf(stderr, "utime: Updated times for %s\n", path);
+            return 0; // Success
+        }
+    }
+
+    fprintf(stderr, "utime: File not found %s\n", path);
+    return -ENOENT; // No such file
 }
 
 /*
