@@ -14,10 +14,12 @@ int dm510fs_read( const char *, char *, size_t, off_t, struct fuse_file_info * )
 int dm510fs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi);
 int dm510fs_release(const char *path, struct fuse_file_info *fi);
 int dm510fs_mkdir(const char *path, mode_t mode);
+int dm510fs_mknod(const char *path, mode_t  mode, dev_t rdev);
 int dm510fs_unlink(const char *path);
 int dm510fs_rmdir(const char *path);
 int dm510fs_utime(const char *path, struct utimbuf *ubuf);
 int dm510fs_rename(const char *oldpath, const char *newpath);
+int dm510fs_truncate(const char *path, off_t size);
 void* dm510fs_init();
 void dm510fs_destroy(void *private_data);
 /*
@@ -27,11 +29,11 @@ void dm510fs_destroy(void *private_data);
 static struct fuse_operations dm510fs_oper = {
 	.getattr	= dm510fs_getattr,
 	.readdir	= dm510fs_readdir,
-	.mknod = NULL,
+	.mknod = dm510fs_mknod,
 	.mkdir = dm510fs_mkdir,
 	.unlink = dm510fs_unlink,
 	.rmdir = dm510fs_rmdir,
-	.truncate = NULL,
+	.truncate = dm510fs_truncate,
 	.open	= dm510fs_open,
 	.read	= dm510fs_read,
 	.release = dm510fs_release,
@@ -60,6 +62,7 @@ typedef struct Inode {
 	off_t size;
 	time_t atime;
 	time_t mtime;
+	time_t ctime; //Change time
 } Inode;
 
 Inode filesystem[MAX_INODES];
@@ -92,6 +95,9 @@ int dm510fs_getattr( const char *path, struct stat *stbuf ) {
 			stbuf->st_mode = filesystem[i].mode;
 			stbuf->st_nlink = filesystem[i].nlink;
 			stbuf->st_size = filesystem[i].size;
+            		stbuf->st_atime = filesystem[i].atime; // Access time
+            		stbuf->st_mtime = filesystem[i].mtime; // Modification time
+			stbuf->st_ctime = filesystem[i].ctime; // Set the change time
 			return 0;
 		}
 	}
@@ -233,6 +239,46 @@ int dm510fs_mkdir(const char *path, mode_t mode) {
 	return 0;
 }
 
+int dm510fs_mknod(const char *path, mode_t mode, dev_t rdev) {
+    printf("mknod: (path=%s, mode=%o)\n", path, mode);
+
+    // Check if the path already exists
+    for (int i = 0; i < MAX_INODES; i++) {
+        if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
+            printf("mknod: File already exists\n");
+            return -EEXIST;
+        }
+    }
+
+    // Find an inactive inode
+    int inode_index = -1;
+    for (int i = 0; i < MAX_INODES; i++) {
+        if (!filesystem[i].is_active) {
+            inode_index = i;
+            break;
+        }
+    }
+
+    if (inode_index == -1) {
+        printf("mknod: No available inode\n");
+        return -ENOSPC;  // No space left on device
+    }
+
+    // Initialize the inode
+    Inode *inode = &filesystem[inode_index];
+    inode->is_active = true;
+    inode->is_dir = false;
+    inode->mode = mode;
+    inode->nlink = 1;
+    inode->size = 0;  // Initially, the size is 0 because no data is written yet
+    strncpy(inode->path, path, MAX_PATH_LENGTH);
+    memset(inode->data, 0, MAX_DATA_IN_FILE);
+
+    printf("mknod: File created at inode %d\n", inode_index);
+    return 0;
+}
+
+
 /*
  * Remove a file.
  */
@@ -340,6 +386,7 @@ int dm510fs_rename(const char *oldpath, const char *newpath) {
     return -ENOENT;
 }
 
+
 /*
  * Update the access and modification times of a file with nanosecond precision.
  */
@@ -351,7 +398,6 @@ int dm510fs_utime(const char *path, struct utimbuf *ubuf) {
         if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
             // Update the inode's timestamps
             time_t now = time(NULL); // Get current time
-
             if (ubuf != NULL) {
                 // If times are provided, update to those times
                 filesystem[i].atime = ubuf->actime;
@@ -361,8 +407,8 @@ int dm510fs_utime(const char *path, struct utimbuf *ubuf) {
                 filesystem[i].atime = now;
                 filesystem[i].mtime = now;
             }
-
-            fprintf(stderr, "utime: Updated times for %s\n", path);
+	    // Update the ctime to the current time
+	    filesystem[i].ctime = now; 
             return 0; // Success
         }
     }
@@ -370,6 +416,41 @@ int dm510fs_utime(const char *path, struct utimbuf *ubuf) {
     fprintf(stderr, "utime: File not found %s\n", path);
     return -ENOENT; // No such file
 }
+
+int dm510fs_truncate(const char *path, off_t new_size) {
+    printf("truncate: (path=%s, new_size=%lld)\n", path, (long long)new_size);
+
+    // Find the inode for the given path
+    for (int i = 0; i < MAX_INODES; i++) {
+        if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
+            if (new_size < filesystem[i].size) {
+                // Shrinking the file, so clear the truncated part
+                memset(filesystem[i].data + new_size, 0, filesystem[i].size - new_size);
+            } else if (new_size > filesystem[i].size) {
+                // Extending the file, so fill the new space with zeroes
+                if (new_size > MAX_DATA_IN_FILE) {
+                    // New size is too large for our file data array
+                    return -EFBIG;
+                }
+                memset(filesystem[i].data + filesystem[i].size, 0, new_size - filesystem[i].size);
+            }
+
+            // Set the new file size
+            filesystem[i].size = new_size;
+
+            // Update the inode modification time to the current time
+            filesystem[i].mtime = time(NULL);
+
+            // Change should update ctime as well
+            filesystem[i].ctime = filesystem[i].mtime;
+
+            return 0; // Success
+        }
+    }
+
+    return -ENOENT; // File not found
+}
+
 
 /*
  * This is the only FUSE function that doesn't have a directly corresponding system call, although close(2) is related.
