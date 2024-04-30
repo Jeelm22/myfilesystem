@@ -22,6 +22,7 @@ int dm510fs_rename(const char *oldpath, const char *newpath);
 int dm510fs_truncate(const char *path, off_t size);
 void* dm510fs_init();
 void dm510fs_destroy(void *private_data);
+
 /*
  * See descriptions in fuse source code usually located in /usr/include/fuse/fuse.h
  * Notice: The version on Github is a newer version than installed at IMADA
@@ -44,6 +45,7 @@ static struct fuse_operations dm510fs_oper = {
 	.destroy = dm510fs_destroy
 };
 
+// Define constrants for limts within filesystem 
 #define MAX_DATA_IN_FILE 256
 #define MAX_PATH_LENGTH  256
 #define MAX_NAME_LENGTH  256
@@ -52,22 +54,24 @@ static struct fuse_operations dm510fs_oper = {
 
 /* The Inode for the filesystem*/
 typedef struct Inode {
-	bool is_active;
-	bool is_dir;
-	char data[MAX_DATA_IN_FILE];
-	char path[MAX_PATH_LENGTH];
-	char name[MAX_NAME_LENGTH];
-	mode_t mode;
-	nlink_t nlink;
-	off_t size;
-	time_t atime;
-	time_t mtime;
-	time_t ctime; //Change time
+	bool is_active;     // Indicates whether the indoe is in use
+	bool is_dir;        // Indicates whether the indoe is a directory
+	char data[MAX_DATA_IN_FILE];    // Fixed size array, stores the files data
+	char path[MAX_PATH_LENGTH];     // A string storing the full path of the file/directory
+	char name[MAX_NAME_LENGTH];     // String representing the name of the file/directory 
+	mode_t mode;        // Specify the file type and permissions
+	nlink_t nlink;      // The link count
+	off_t size;         // Size of the file in bytes
+	time_t atime;       // Access time
+	time_t mtime;       // Modificaton time
+	time_t ctime;       //Change time
 } Inode;
 
+// Array that represent the entire filesystem 
 Inode filesystem[MAX_INODES];
 
 
+// Prints the path of the inode
 void debug_inode(int i) {
 	Inode inode = filesystem[i];
 
@@ -95,8 +99,8 @@ int dm510fs_getattr( const char *path, struct stat *stbuf ) {
 			stbuf->st_mode = filesystem[i].mode;
 			stbuf->st_nlink = filesystem[i].nlink;
 			stbuf->st_size = filesystem[i].size;
-            		stbuf->st_atime = filesystem[i].atime; // Access time
-            		stbuf->st_mtime = filesystem[i].mtime; // Modification time
+            stbuf->st_atime = filesystem[i].atime; // Access time
+            stbuf->st_mtime = filesystem[i].mtime; // Modification time
 			stbuf->st_ctime = filesystem[i].ctime; // Set the change time
 			return 0;
 		}
@@ -134,7 +138,7 @@ int dm510fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t o
 
     printf("readdir: (path=%s)\n", path);
 
-    // Check if the path is the root directory
+    // Checks if the path is the root directory
     if (strcmp(path, "/") != 0) {
         return -ENOENT;
     }
@@ -184,7 +188,7 @@ int dm510fs_read( const char *path, char *buf, size_t size, off_t offset, struct
 	return 0;
 }
 
-
+// Writes data to a file
 int dm510fs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
     (void) fi; // If you're not using file handles.
 
@@ -239,6 +243,7 @@ int dm510fs_mkdir(const char *path, mode_t mode) {
 	return 0;
 }
 
+// Make files 
 int dm510fs_mknod(const char *path, mode_t mode, dev_t rdev) {
     printf("mknod: (path=%s, mode=%o)\n", path, mode);
 
@@ -279,9 +284,8 @@ int dm510fs_mknod(const char *path, mode_t mode, dev_t rdev) {
 }
 
 
-/*
- * Remove a file.
- */
+
+// Remove a file.
 int dm510fs_unlink(const char *path) {
     printf("unlink: (path=%s)\n", path);
 
@@ -303,19 +307,18 @@ int dm510fs_unlink(const char *path) {
     return -ENOENT;  // No such file
 }
 
-/*
- * Remove a directory.
- */
+
+// Remove a directory.
 int dm510fs_rmdir(const char *path) {
     printf("rmdir: (path=%s)\n", path);
 
-    // First, check if the directory is at the root and is "/", which should not be removed
+    // First, checks if the directory is at the root and is "/", which should not be removed
     if (strcmp(path, "/") == 0) {
         printf("Cannot remove root directory\n");
         return -EBUSY; // or return -EPERM
     }
 
-    // Locate the inode representing the directory
+    // Locates the inode representing the directory
     for (int i = 0; i < MAX_INODES; i++) {
         if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0 && filesystem[i].is_dir) {
             // Check if the directory is empty
@@ -334,7 +337,7 @@ int dm510fs_rmdir(const char *path) {
 
             // If the directory is empty, deactivate the inode
             filesystem[i].is_active = false;
-            memset(&filesystem[i], 0, sizeof(Inode)); // Optional: Clear the inode data
+            memset(&filesystem[i], 0, sizeof(Inode)); 
             printf("Directory removed successfully\n");
             return 0; // Success
         }
@@ -345,15 +348,14 @@ int dm510fs_rmdir(const char *path) {
     return -ENOENT; // No such directory
 }
 
-/*
- * Rename a file or directory.
- */
+
+// Renames a file or directory.
 int dm510fs_rename(const char *oldpath, const char *newpath) {
     printf("rename: (oldpath=%s, newpath=%s)\n", oldpath, newpath);
 
     int i, target_idx = -1;
 
-    // Check if the new path already exists
+    // Checks if the new path already exists
     for (i = 0; i < MAX_INODES; i++) {
         if (filesystem[i].is_active && strcmp(filesystem[i].path, newpath) == 0) {
             target_idx = i;
@@ -361,7 +363,7 @@ int dm510fs_rename(const char *oldpath, const char *newpath) {
         }
     }
 
-    // Find the inode for the old path
+    // Finds the inode for the old path
     for (i = 0; i < MAX_INODES; i++) {
         if (filesystem[i].is_active && strcmp(filesystem[i].path, oldpath) == 0) {
             // If the new path exists and is a non-empty directory, return error
@@ -387,9 +389,8 @@ int dm510fs_rename(const char *oldpath, const char *newpath) {
 }
 
 
-/*
- * Update the access and modification times of a file with nanosecond precision.
- */
+
+// Updates the access and modification times of a file with nanosecond precision.
 int dm510fs_utime(const char *path, struct utimbuf *ubuf) {
     fprintf(stderr, "utime: (path=%s)\n", path);
 
@@ -417,14 +418,15 @@ int dm510fs_utime(const char *path, struct utimbuf *ubuf) {
     return -ENOENT; // No such file
 }
 
+// Changes size of a file 
 int dm510fs_truncate(const char *path, off_t new_size) {
     printf("truncate: (path=%s, new_size=%lld)\n", path, (long long)new_size);
 
-    // Find the inode for the given path
+    // Finds the inode for the given path
     for (int i = 0; i < MAX_INODES; i++) {
         if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
             if (new_size < filesystem[i].size) {
-                // Shrinking the file, so clear the truncated part
+                // Shrinks the file, so clear the truncated part
                 memset(filesystem[i].data + new_size, 0, filesystem[i].size - new_size);
             } else if (new_size > filesystem[i].size) {
                 // Extending the file, so fill the new space with zeroes
@@ -441,7 +443,7 @@ int dm510fs_truncate(const char *path, off_t new_size) {
             // Update the inode modification time to the current time
             filesystem[i].mtime = time(NULL);
 
-            // Change should update ctime as well
+            // Change update ctime as well
             filesystem[i].ctime = filesystem[i].mtime;
 
             return 0; // Success
