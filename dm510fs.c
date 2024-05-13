@@ -197,16 +197,13 @@ int dm510fs_write(const char *path, const char *buf, size_t size, off_t offset, 
         if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
             // Make sure we don't write past the file's maximum data size.
             if (offset + size > MAX_DATA_IN_FILE) {
-                size = MAX_DATA_IN_FILE - offset;
-            }
-            if (size == 0) {
-                return -EFBIG; // File too big.
+                return -EFBIG; // File too big, adjust error handling to return immediately.
             }
 
             // Perform the write operation.
             memcpy(filesystem[i].data + offset, buf, size);
 
-            // Update the size of the file.
+            // Update the size of the file if necessary.
             if (offset + size > filesystem[i].size) {
                 filesystem[i].size = offset + size;
             }
