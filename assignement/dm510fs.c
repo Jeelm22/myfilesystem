@@ -4,25 +4,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include <stdint.h> 
 #include <time.h>
 #include <utime.h>
+#include <sys/types.h>
+#include <ctype.h> // For character manipulation functions - Caesar Cipher Shift
 
-int dm510fs_getattr( const char *, struct stat * );
-int dm510fs_readdir( const char *, void *, fuse_fill_dir_t, off_t, struct fuse_file_info * );
-int dm510fs_open( const char *, struct fuse_file_info * );
-int dm510fs_read( const char *, char *, size_t, off_t, struct fuse_file_info * );
-int dm510fs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi);
-int dm510fs_release(const char *path, struct fuse_file_info *fi);
-int dm510fs_mkdir(const char *path, mode_t mode);
-int dm510fs_mknod(const char *path, mode_t  mode, dev_t rdev);
-int dm510fs_unlink(const char *path);
-int dm510fs_rmdir(const char *path);
-int dm510fs_utime(const char *path, struct utimbuf *ubuf);
-int dm510fs_rename(const char *oldpath, const char *newpath);
-int dm510fs_truncate(const char *path, off_t size);
-void* dm510fs_init();
-void dm510fs_destroy(void *private_data);
+// Filesystem operations declarations
+int dm510fs_getattr(const char *, struct stat *);
+int dm510fs_readdir(const char *, void *, fuse_fill_dir_t, off_t, struct fuse_file_info *);
+int dm510fs_open(const char *, struct fuse_file_info *);
+int dm510fs_read(const char *, char *, size_t, off_t, struct fuse_file_info *);
+int dm510fs_write(const char *, const char *, size_t, off_t, struct fuse_file_info *);
+int dm510fs_release(const char *, struct fuse_file_info *);
+int dm510fs_mkdir(const char *, mode_t);
+int dm510fs_mknod(const char *, mode_t, dev_t);
+int dm510fs_unlink(const char *);
+int dm510fs_rmdir(const char *);
+int dm510fs_utime(const char *, struct utimbuf *);
+int dm510fs_rename(const char *, const char *);
+int dm510fs_truncate(const char *, off_t);
+void *dm510fs_init();
+void dm510fs_destroy(void *);
 
 /*
  * See descriptions in fuse source code usually located in /usr/include/fuse/fuse.h
@@ -47,43 +49,127 @@ static struct fuse_operations dm510fs_oper = {
 };
 
 // Define constrants for limts within filesystem 
-#define MAX_POINTERS 12 
+#define MAX_DATA_IN_FILE 256
 #define MAX_PATH_LENGTH  256
 #define MAX_NAME_LENGTH  256
 #define MAX_INODES  4
-#define BLOCK_SIZE 4096     // 4KB per block 
-#define TOTAL_BLOCKS 1024    // 1024 blocks of 4KB each 
-// Path to save filesystem state
-#define FS_STATE_FILE "/home/dm510/dm510/myfilesystem/fs_state.dat"
+#define FS_STATE_FILE "/home/dm510/dm510/linux-6.6.9/kernel/dm510/assignment3/fs_state.dat"
+#define SHIFT_VAL 5 // Shift value for Caesar Cipher
+#define DIRECT_DATA_SIZE 128  // Size of direct data area in bytes
+#define NUM_POINTERS 10       // Number of pointers to data blocks
+#define BLOCK_SIZE 4096       // Assuming a block size of 4KB
+#define MAX_BLOCKS 100        // Number of blocks
+#define max(a, b) ((a) > (b) ? (a) : (b))
+#define min(a, b) ((a) < (b) ? (a) : (b))
+
+// Global array to simulate disk blocks
+char data_blocks[MAX_BLOCKS][BLOCK_SIZE];
 
 /* The Inode for the filesystem*/
 typedef struct Inode {
-    bool is_active;                 // Indicates whether the inode is in use
-    bool is_dir;                    // Indicates whether the inode is a directory
-    int data_blocks[MAX_POINTERS];  // Array of data block indices
-    char path[MAX_PATH_LENGTH];     // Full path of the file/directory
-    char name[MAX_NAME_LENGTH];     // Name of the file/directory
-    mode_t mode;                    // File type and permissions
-    nlink_t nlink;                  // Link count
-    off_t size;                     // Total size of the file in bytes
-    time_t atime;                   // Last access time
-    time_t mtime;                   // Last modification time
-    time_t ctime;                   // Last status change time
+	bool is_active;     // Indicates whether the indoe is in use
+	bool is_dir;        // Indicates whether the indoe is a directory
+        char direct_data[DIRECT_DATA_SIZE]; // Directly stored data within the inode
+        int data_block_pointers[NUM_POINTERS]; // Pointers to data blocks
+        char name[MAX_NAME_LENGTH]; // Name of the file/directory
+	size_t size;        // Total size of the file
+	mode_t mode;        // Specify the file type and permissions
+	nlink_t nlink;      // The link count
+	time_t atime;       // Access time
+	time_t mtime;       // Modificaton time
+	time_t ctime;       //Change time
+	char path[MAX_PATH_LENGTH]; // Path of the file/directory
 } Inode;
-
-char blocks[TOTAL_BLOCKS][BLOCK_SIZE];  //Simulating block storage 
-
-//Function to get a pointer to the block data
-char* get_block_data(int block_number) {
-    if (block_number >= 0 && block_number < TOTAL_BLOCKS) {
-        return blocks[block_number];
-    }
-    return NULL;
-}
 
 // Array that represent the entire filesystem 
 Inode filesystem[MAX_INODES];
 
+// Caesar Cipher Encryption function
+void caesar_encrypt(char *data, size_t size) {
+    for (int i = 0; i < size; i++) {
+        if (isalpha(data[i])) {
+            char base = (isupper(data[i]) ? 'A' : 'a');
+            data[i] = ((data[i] - base + SHIFT_VAL) % 26) + base;
+        }
+    }
+}
+
+// Caesar Cipher Decryption function
+void caesar_decrypt(char *data, size_t size) {
+    for (int i = 0; i < size; i++) {
+        if (isalpha(data[i])) {
+            char base = (isupper(data[i]) ? 'A' : 'a');
+            data[i] = ((data[i] - base - SHIFT_VAL + 26) % 26) + base;
+        }
+    }
+}
+
+// Function to find an inode by path
+int find_inode(const char *path) {
+    for (int i = 0; i < MAX_INODES; i++) {
+        if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
+            return i;
+        }
+    }
+    return -1; // inode not found
+}
+
+// Function to clear the data in an inode
+void clear_inode_data(Inode *inode) {
+    memset(inode->direct_data, 0, DIRECT_DATA_SIZE);
+    for (int i = 0; i < NUM_POINTERS; i++) {
+        inode->data_block_pointers[i] = -1;  // Assuming -1 denotes unused block
+    }
+}
+
+// Function to extract the parent directory from a given path
+void extract_parent_directory(const char *path, char *parent_dir) {
+    strcpy(parent_dir, path);
+    char *last_slash = strrchr(parent_dir, '/');
+    if (last_slash != NULL) {
+        *last_slash = '\0';  // Null-terminate at the last slash
+    }
+}
+
+// Function to remove a directory entry
+void remove_directory_entry(const char *dir_path, const char *entry) {
+    int dir_idx = find_inode(dir_path);
+    if (dir_idx != -1) {
+        // Implementation would depend on how directory entries are stored
+        // This could involve marking an entry as inactive in a list
+    }
+}
+
+// Function to check if a directory is empty
+bool is_directory_empty(const Inode *dir) {
+    for (int i = 0; i < MAX_INODES; i++) {
+        if (filesystem[i].is_active && strstr(filesystem[i].path, dir->path) == filesystem[i].path &&
+            strcmp(filesystem[i].path, dir->path) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void save_fs_state() {
+    FILE *fp = fopen(FS_STATE_FILE, "wb");
+    if (fp == NULL) {
+        fprintf(stderr, "Failedf to open file for writing filesystem state\n");
+        return;
+    }
+    fwrite(filesystem, sizeof(Inode), MAX_INODES, fp);
+    fclose(fp);
+}
+
+void load_fs_state() {
+    FILE *fp = fopen(FS_STATE_FILE, "rb");
+    if (fp == NULL) {
+        fprintf(stderr, "Failed to open file for reading filesystem state\n");
+        return;
+    }
+    fread(filesystem, sizeof(Inode), MAX_INODES, fp);
+    fclose(fp);
+}
 
 // Prints the path of the inode
 void debug_inode(int i) {
@@ -93,62 +179,6 @@ void debug_inode(int i) {
 	printf("      Path: %s\n", inode.path);
 	printf("=============================================\n");
 }
-
-// Our block bitmap is an array where each bit represnts the status (used or free) of a block in the filesystem 
-uint8_t block_bitmap[TOTAL_BLOCKS / 8]; //Each bit represents a block
-
-void init_block_bitmap() {
-    memset(block_bitmap, 0, sizeof(block_bitmap));
-}
-
-/*
-Functions to allocate and free blocks using the bitmap, 
-the functions search for a free bit in the bitmap, 
-set it when a block is allocated, and clear it when a block is freed 
-*/
-int allocate_block() {
-    for (int i = 0; i < TOTAL_BLOCKS; i++) {
-        int byteIndex = i / 8;
-        int bitIndex = i % 8;
-
-        if (!(block_bitmap[byteIndex] & (1 << bitIndex))) {  // Check if the bit is 0
-            block_bitmap[byteIndex] |= (1 << bitIndex);  // Set the bit to 1
-            return i;  // Return the block index
-        }
-    }
-    return -1;  // No free blocks available
-}
-
-void free_block(int block_index) {
-    int byteIndex = block_index / 8;
-    int bitIndex = block_index % 8;
-    block_bitmap[byteIndex] &= ~(1 << bitIndex);  // Set the bit to 0
-}
-
-
-void save_fs_state() {
-    FILE *fp = fopen(FS_STATE_FILE, "wb");
-    if (fp == NULL) {
-        perror("Failed to open file for writing filesystem state");
-        return;
-    }
-    fwrite(block_bitmap, sizeof(block_bitmap), 1, fp);
-    fwrite(filesystem, sizeof(Inode), MAX_INODES, fp);
-    fclose(fp);
-}
-
-void load_fs_state() {
-    FILE *fp = fopen(FS_STATE_FILE, "rb");
-    if (fp == NULL) {
-        perror("Failed to open file for reading filesystem state");
-        return;
-    }
-    fread(block_bitmap, sizeof(block_bitmap), 1, fp);
-    fread(filesystem, sizeof(Inode), MAX_INODES, fp);
-    fclose(fp);
-}
-
-
 
 /*
  * Return file attributes.
@@ -202,30 +232,36 @@ int dm510fs_getattr( const char *path, struct stat *stbuf ) {
  * in particular it can return -EBADF if the file handle is invalid, or -ENOENT if you use the path argument and the path doesn't exist.
 */
 int dm510fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
-    (void) offset; // Offset is handled by FUSE itself
-    (void) fi;     // Not used
+    printf("Readdir called on: %s\n", path);
+    
+    int dir_idx = find_inode(path);
+    if (dir_idx == -1) {
+        printf("Directory not found: %s\n", path);
+        return -ENOENT;
+    }
 
-    printf("readdir: (path=%s)\n", path);
+    if (!filesystem[dir_idx].is_dir) {
+        printf("Not a directory: %s\n", path);
+        return -ENOTDIR;
+    }
 
-    int path_len = strlen(path);
+    // Add current and parent directory entries
+    filler(buf, ".", NULL, 0);
+    filler(buf, "..", NULL, 0);
 
-    // Fill the current directory and the parent directory entries
-    filler(buf, ".", NULL, 0);  // Current directory
-    filler(buf, "..", NULL, 0); // Parent directory
-
-    // Loop through all inodes to find directories and files under the specified 'path'
+    // Iterate over all inodes and list active files and directories that are children of the directory
     for (int i = 0; i < MAX_INODES; i++) {
         if (filesystem[i].is_active) {
-            if (strncmp(filesystem[i].path, path, path_len) == 0) {
-                if (filesystem[i].path[path_len] == '/' || path_len == 1) { // Ensure it's a direct child
-                    // Skip any additional '/' that might not be part of the immediate directory name
-                    const char *sub_path = filesystem[i].path + path_len;
-                    if (*sub_path == '/') sub_path++;
-
-                    // Ensure we're only listing direct children (no '/' in the rest of the string)
-                    const char *slash_pos = strchr(sub_path, '/');
-                    if (slash_pos == NULL || slash_pos == sub_path) {
-                        filler(buf, sub_path, NULL, 0);
+            const char* full_path = filesystem[i].path;
+            if (strstr(full_path, path) == full_path) { // Check if path is a prefix
+                const char *subpath = full_path + strlen(path);
+                // Ensure no leading slashes unless root
+                if (subpath[0] == '/') subpath++;
+                if (subpath[0] != '\0' && strchr(subpath, '/') == NULL) {
+                    printf("Adding entry: %s\n", subpath);
+                    if (filler(buf, subpath, NULL, 0) != 0) {
+                        printf("Buffer full, cannot add more entries after %s\n", subpath);
+                        return -ENOMEM;
                     }
                 }
             }
@@ -234,7 +270,6 @@ int dm510fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t o
 
     return 0;
 }
-
 
 /*
  * Open a file.
@@ -253,135 +288,139 @@ int dm510fs_open( const char *path, struct fuse_file_info *fi ) {
  * Returns the number of bytes transferred, or 0 if offset was at or beyond the end of the file. Required for any sensible filesystem.
 */
 int dm510fs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
-    printf("read: (path=%s)\n", path);
+    printf("read: (path=%s, offset=%ld, size=%ld)\n", path, offset, size);
 
     for (int i = 0; i < MAX_INODES; i++) {
-        if (strcmp(filesystem[i].path, path) == 0) {
-            printf("Read: Found inode for path %s at location %i\n", path, i);
-            off_t end = offset + size > filesystem[i].size ? filesystem[i].size : offset + size;
-            off_t current_offset = offset;
+        if (strcmp(filesystem[i].path, path) == 0 && filesystem[i].is_active) {
+            if (offset >= filesystem[i].size) {
+                return 0; // Offset is beyond the end of the file, nothing to read
+            }
+
+            size_t bytes_to_read = min(size, filesystem[i].size - offset);
             size_t bytes_read = 0;
 
-            while (current_offset < end) {
-                int block_index = current_offset / BLOCK_SIZE;
-                int block_offset = current_offset % BLOCK_SIZE;
-                size_t to_read = end - current_offset;
-                if (to_read > (BLOCK_SIZE - block_offset)) {
-                    to_read = BLOCK_SIZE - block_offset;
-                }
-                char *block_data = get_block_data(filesystem[i].data_blocks[block_index]);
-                if (block_data == NULL) {
-                    break;
-                }
-                memcpy(buf + bytes_read, block_data + block_offset, to_read);
-                bytes_read += to_read;
-                current_offset += to_read;
+            // Read from direct data if within range
+            if (offset < DIRECT_DATA_SIZE) {
+                size_t direct_read_size = min(DIRECT_DATA_SIZE - offset, bytes_to_read);
+                memcpy(buf, filesystem[i].direct_data + offset, direct_read_size);
+                buf += direct_read_size;
+                bytes_read += direct_read_size;
+                bytes_to_read -= direct_read_size;
+                offset += direct_read_size;
             }
-            return bytes_read;
+
+            // Continue reading from block data if needed
+            while (bytes_to_read > 0 && offset < filesystem[i].size) {
+                int block_index = (offset - DIRECT_DATA_SIZE) / BLOCK_SIZE;
+                if (block_index >= NUM_POINTERS || filesystem[i].data_block_pointers[block_index] == -1) {
+                    break; // No more data available or block not assigned
+                }
+                size_t block_offset = (offset - DIRECT_DATA_SIZE) % BLOCK_SIZE;
+                size_t block_read_size = min(BLOCK_SIZE - block_offset, bytes_to_read);
+                memcpy(buf, data_blocks[filesystem[i].data_block_pointers[block_index]] + block_offset, block_read_size);
+
+                buf += block_read_size;
+                bytes_read += block_read_size;
+                bytes_to_read -= block_read_size;
+                offset += block_read_size;
+            }
+
+            // Decrypt data after reading it from the filesystem
+            caesar_decrypt(buf - bytes_read, bytes_read);
+
+            printf("Decrypted message: %.*s\n", (int)bytes_read, buf - bytes_read);
+
+            return bytes_read; // Return the actual number of bytes read
         }
     }
-    return 0;
+    return -ENOENT; // File not found
 }
 
-
+// Writes data to a file
 int dm510fs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
-    (void) fi;  // Not using file handles in this example.
+    if (size == 0) return 0;  // No data to write
 
-    // Find the inode corresponding to the path.
+    // Allocate buffer for encrypted data
+    char *encrypted_buf = malloc(size);
+    if (!encrypted_buf) return -ENOMEM;  // Allocation failed
+    memcpy(encrypted_buf, buf, size);
+
+    // Encrypt the data before writing
+    caesar_encrypt(encrypted_buf, size);
+
+    // Log the encrypted message
+    printf("Encrypted message being written: ");
+    for (size_t i = 0; i < size; i++) {
+        printf("%c", isprint(encrypted_buf[i]) ? encrypted_buf[i] : '.'); // Print dots for non-printable characters
+    }
+    printf("\n");
+
+    int bytes_written = 0;
     for (int i = 0; i < MAX_INODES; i++) {
         if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
-            // Calculate start block and end block within the inode's data_blocks array
-            int start_block = offset / BLOCK_SIZE;
-            int end_block = (offset + size - 1) / BLOCK_SIZE;
-
-            // Check if we need to allocate new blocks
-            for (int b = start_block; b <= end_block; b++) {
-                if (filesystem[i].data_blocks[b] == 0) {  // Assuming 0 means unallocated
-                    int new_block = allocate_block();
-                    if (new_block == -1) return -ENOSPC;  // No space left
-                    filesystem[i].data_blocks[b] = new_block;
-                }
+            // Ensure not to write beyond the file system's data capacity
+            if (offset + size > MAX_DATA_IN_FILE) {
+                size = MAX_DATA_IN_FILE - offset;
             }
 
-            // Write data to blocks
-            off_t current_offset = offset;
-            size_t remaining_size = size;
-            while (remaining_size > 0) {
-                int block_index = current_offset / BLOCK_SIZE;
-                int block_offset = current_offset % BLOCK_SIZE;
-                int write_size = BLOCK_SIZE - block_offset < remaining_size ? BLOCK_SIZE - block_offset : remaining_size;
-                
-                // Find physical block index from inode's block array
-                int block_number = filesystem[i].data_blocks[block_index];
-                char* block_data = get_block_data(block_number);  // Assuming function to map block number to memory
-                
-                memcpy(block_data + block_offset, buf + (size - remaining_size), write_size);
-
-                remaining_size -= write_size;
-                current_offset += write_size;
+            // Write data within the direct data range
+            if (offset < DIRECT_DATA_SIZE) {
+                size_t to_write = min(size, DIRECT_DATA_SIZE - offset);
+                memcpy(filesystem[i].direct_data + offset, encrypted_buf, to_write);
+                bytes_written += to_write;
             }
 
-            // Update the size of the file if necessary
-            if (offset + size > filesystem[i].size) {
-                filesystem[i].size = offset + size;
+            // Update offset for any additional data beyond the direct data area
+            size_t remaining_size = size - bytes_written;
+            offset += bytes_written;
+
+            // Write to additional data blocks if needed and if remaining_size > 0
+            while (remaining_size > 0 && offset < MAX_DATA_IN_FILE) {
+                // Handle block-level writing if necessary
+                // This part is left as an exercise to implement block allocation and writing
             }
 
-            return size;
+            filesystem[i].size = max(filesystem[i].size, offset + remaining_size);
+            free(encrypted_buf);
+            return bytes_written; // Return the number of bytes written
         }
     }
 
-    // If the file was not found, return an error.
-    return -ENOENT;
+    free(encrypted_buf);
+    return -ENOENT; // File not found
 }
 
-
-
+/* Make directories - TODO */
 int dm510fs_mkdir(const char *path, mode_t mode) {
-    printf("mkdir: (path=%s)\n", path);
-
-    // Check if the directory already exists
-    for (int i = 0; i < MAX_INODES; i++) {
-        if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
-            printf("mkdir: Directory or file with the same path already exists\n");
-            return -EEXIST; // Directory already exists
-        }
+    if (find_inode(path) != -1) {
+        printf("mkdir: Directory already exists at %s\n", path);
+        return -EEXIST;  // Directory already exists
     }
 
     // Locate the first unused Inode in the filesystem
     for (int i = 0; i < MAX_INODES; i++) {
-        if (!filesystem[i].is_active) { // Found an unused inode
-            printf("mkdir: Found unused inode at location %i\n", i);
-            
-            // Initialize the inode as a directory
+        if (!filesystem[i].is_active) {
+            printf("mkdir: Found unused inode at location %i for %s\n", i, path);
             filesystem[i].is_active = true;
             filesystem[i].is_dir = true;
-            filesystem[i].mode = S_IFDIR | mode; // Respect the mode specified in the function call
-            filesystem[i].nlink = 2; // One link from the parent directory, one from itself (".")
-            strncpy(filesystem[i].path, path, MAX_PATH_LENGTH); // Ensure no buffer overflow
+            filesystem[i].mode = S_IFDIR | mode;  // Apply requested permissions
+            filesystem[i].nlink = 2;  // '.' and '..'
+            strcpy(filesystem[i].path, path);
 
             debug_inode(i);
-            return 0; // Success
+            return 0;  // Success
         }
     }
 
-    printf("mkdir: No free inodes available\n");
-    return -ENOSPC; // No space left to create new directory
+    return -ENOSPC;  // No space left for new inode
 }
-
 
 // Make files 
 int dm510fs_mknod(const char *path, mode_t mode, dev_t rdev) {
-    printf("mknod: (path=%s, mode=%o)\n", path, mode);
+    if (strlen(path) >= MAX_PATH_LENGTH) return -ENAMETOOLONG;
 
-    // Check if the path already exists
-    for (int i = 0; i < MAX_INODES; i++) {
-        if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
-            printf("mknod: File already exists\n");
-            return -EEXIST;
-        }
-    }
+    if (find_inode(path) != -1) return -EEXIST;
 
-    // Find an inactive inode
     int inode_index = -1;
     for (int i = 0; i < MAX_INODES; i++) {
         if (!filesystem[i].is_active) {
@@ -391,162 +430,96 @@ int dm510fs_mknod(const char *path, mode_t mode, dev_t rdev) {
     }
 
     if (inode_index == -1) {
-        printf("mknod: No available inode\n");
-        return -ENOSPC;  // No space left on device
+        printf("No inode available\n");
+        return -ENOSPC;  // No space left on device (no available inode)
     }
 
-    // Initialize the inode
+    // Initialize the new inode
     Inode *inode = &filesystem[inode_index];
     inode->is_active = true;
-    inode->is_dir = false;
-    inode->mode = mode | S_IFREG; // Ensure the mode explicitly sets this as a regular file
+    inode->is_dir = (mode & S_IFDIR) != 0;
+    inode->mode = mode | (inode->is_dir ? S_IFDIR : S_IFREG);
     inode->nlink = 1;
-    inode->size = 0;  // Initially, the size is 0 because no data is written yet
-    strncpy(inode->path, path, MAX_PATH_LENGTH);
+    inode->size = 0;
+    strcpy(inode->path, path);
 
-    // Clear block pointers
-    memset(inode->data_blocks, 0, sizeof(inode->data_blocks));  // Ensure all data block pointers are initialized to zero
+    printf("Created %s at inode %d\n", path, inode_index);
 
-    printf("mknod: File created at inode %d\n", inode_index);
     return 0;
 }
 
-
-
-
 // Remove a file.
 int dm510fs_unlink(const char *path) {
-    printf("unlink: (path=%s)\n", path);
+    // Find inode of the file
+    int inode_index = find_inode(path);
+    if (inode_index == -1) return -ENOENT;
 
-    // Loop through the inode array to find and remove the file
-    for (int i = 0; i < MAX_INODES; i++) {
-        if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
-            // File found, deactivate the inode
-            filesystem[i].is_active = false;
-            filesystem[i].size = 0;
+    // Remove the file's data
+    clear_inode_data(&filesystem[inode_index]); // Pass address of the inode
 
-            // Free all allocated blocks
-            for (int j = 0; j < MAX_POINTERS; j++) {
-                if (filesystem[i].data_blocks[j] != 0) { // Assuming 0 means unallocated
-                    free_block(filesystem[i].data_blocks[j]); // Free each allocated block
-                    filesystem[i].data_blocks[j] = 0; // Reset block pointer to 0
-                }
-            }
+    // Set inode as inactive
+    filesystem[inode_index].is_active = false;
 
-            printf("Unlink: Successfully removed %s at location %i\n", path, i);
-            return 0;  // Success
-        }
-    }
+    // Update parent directory to remove the file entry
+    char parent_dir[MAX_PATH_LENGTH];
+    extract_parent_directory(path, parent_dir);
+    remove_directory_entry(parent_dir, path);
 
-    // If we finish the loop without finding the file, it doesn't exist
-    printf("Unlink: File %s not found\n", path);
-    return -ENOENT;  // No such file
+    return 0;
 }
-
-
 
 // Remove a directory.
 int dm510fs_rmdir(const char *path) {
-    printf("rmdir: (path=%s)\n", path);
+    int dir_index = find_inode(path);
+    if (dir_index == -1) return -ENOENT;
 
-    // First, checks if the directory is at the root and is "/", which should not be removed
-    if (strcmp(path, "/") == 0) {
-        printf("Cannot remove root directory\n");
-        return -EBUSY; // Root directory cannot be removed
+    // Check if directory is empty
+    if (!is_directory_empty(&filesystem[dir_index])) { // Pass address of the inode
+        return -ENOTEMPTY;
     }
 
-    // Locates the inode representing the directory
-    for (int i = 0; i < MAX_INODES; i++) {
-        if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0 && filesystem[i].is_dir) {
-            // Check if the directory is empty
-            bool is_empty = true;
-            for (int j = 0; j < MAX_INODES; j++) {
-                if (filesystem[j].is_active && j != i && strncmp(filesystem[j].path, path, strlen(path)) == 0) {
-                    if (strlen(filesystem[j].path) > strlen(path)) { // Ensures it checks within the directory
-                        if (filesystem[j].path[strlen(path)] == '/' && filesystem[j].path[strlen(path) + 1] != '\0') {
-                            is_empty = false;
-                            break;
-                        }
-                    }
-                }
-            }
+    // Set directory inode as inactive
+    filesystem[dir_index].is_active = false;
 
-            if (!is_empty) {
-                printf("Directory is not empty\n");
-                return -ENOTEMPTY; // Directory not empty
-            }
+    // Update parent directory
+    char parent_dir[MAX_PATH_LENGTH];
+    extract_parent_directory(path, parent_dir);
+    remove_directory_entry(parent_dir, path);
 
-            // If the directory is empty, deactivate the inode
-            filesystem[i].is_active = false;
-            memset(&filesystem[i], 0, sizeof(Inode)); // Clear the inode to reset it
-            printf("Directory removed successfully\n");
-            return 0; // Success
-        }
-    }
-
-    // If no matching directory is found
-    printf("No such directory\n");
-    return -ENOENT; // No such directory
+    return 0;
 }
-
-
 
 // Renames a file or directory.
 int dm510fs_rename(const char *oldpath, const char *newpath) {
-    printf("rename: (oldpath=%s, newpath=%s)\n", oldpath, newpath);
+    printf("Attempting to rename from %s to %s\n", oldpath, newpath);
 
-    int i, target_idx = -1;
-
-    // Check if the new path already exists
-    for (i = 0; i < MAX_INODES; i++) {
-        if (filesystem[i].is_active && strcmp(filesystem[i].path, newpath) == 0) {
-            target_idx = i;
-            break;
-        }
-    }
-
-    // Finds the inode for the old path
-    for (i = 0; i < MAX_INODES; i++) {
+    int src_idx = -1, dest_idx = -1;
+    for (int i = 0; i < MAX_INODES; i++) {
         if (filesystem[i].is_active && strcmp(filesystem[i].path, oldpath) == 0) {
-            // If the new path exists and is a non-empty directory, return error
-            if (target_idx != -1 && filesystem[target_idx].is_dir) {
-                // Check if the directory is empty
-                bool is_empty = true;
-                for (int j = 0; j < MAX_INODES; j++) {
-                    if (filesystem[j].is_active && j != target_idx && strncmp(filesystem[j].path, newpath, strlen(newpath)) == 0) {
-                        if (strlen(filesystem[j].path) > strlen(newpath)) {
-                            if (filesystem[j].path[strlen(newpath)] == '/' && filesystem[j].path[strlen(newpath) + 1] != '\0') {
-                                is_empty = false;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if (!is_empty) {
-                    printf("rename: Target directory is not empty\n");
-                    return -ENOTEMPTY;
-                }
-            }
-
-            // If it's an existing file or an empty directory, deactivate it
-            if (target_idx != -1) {
-                filesystem[target_idx].is_active = false;
-            }
-
-            // Update the inode with the new path
-            strncpy(filesystem[i].path, newpath, MAX_PATH_LENGTH);
-            filesystem[i].path[MAX_PATH_LENGTH - 1] = '\0'; // Ensure null termination
-            printf("rename: Successfully renamed %s to %s\n", oldpath, newpath);
-            return 0;
+            src_idx = i;
+        }
+        if (filesystem[i].is_active && strcmp(filesystem[i].path, newpath) == 0) {
+            dest_idx = i;
         }
     }
 
-    printf("rename: Old path does not exist\n");
-    return -ENOENT;
+    if (src_idx == -1) {
+        printf("Source file not found\n");
+        return -ENOENT;
+    }
+
+    if (dest_idx != -1) {
+        // Handle non-empty directory or existing file cases
+        printf("Destination path already exists\n");
+        return -EEXIST;
+    }
+
+    // Update the inode for new path and ensure directory consistency
+    strncpy(filesystem[src_idx].path, newpath, MAX_PATH_LENGTH);
+    printf("Successfully renamed %s to %s\n", oldpath, newpath);
+
+    return 0;
 }
-
-
-
 
 // Updates the access and modification times of a file with nanosecond precision.
 int dm510fs_utime(const char *path, struct utimbuf *ubuf) {
@@ -555,10 +528,10 @@ int dm510fs_utime(const char *path, struct utimbuf *ubuf) {
     // Find the inode corresponding to the path
     for (int i = 0; i < MAX_INODES; i++) {
         if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
+            // Update the inode's timestamps
             time_t now = time(NULL); // Get current time
-
-            // If times are provided, update to those times
             if (ubuf != NULL) {
+                // If times are provided, update to those times
                 filesystem[i].atime = ubuf->actime;
                 filesystem[i].mtime = ubuf->modtime;
             } else {
@@ -566,11 +539,8 @@ int dm510fs_utime(const char *path, struct utimbuf *ubuf) {
                 filesystem[i].atime = now;
                 filesystem[i].mtime = now;
             }
-            
-            // Update the change time to the current time
-            filesystem[i].ctime = now;
-
-            printf("utime: Updated times for %s\n", path);
+	    // Update the ctime to the current time
+	    filesystem[i].ctime = now; 
             return 0; // Success
         }
     }
@@ -579,51 +549,31 @@ int dm510fs_utime(const char *path, struct utimbuf *ubuf) {
     return -ENOENT; // No such file
 }
 
-
 // Changes size of a file 
 int dm510fs_truncate(const char *path, off_t new_size) {
-    printf("truncate: (path=%s, new_size=%lld)\n", path, (long long)new_size);
-
-    // Finds the inode for the given path
     for (int i = 0; i < MAX_INODES; i++) {
         if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
-            // Shrinking or expanding the file requires different handling
             if (new_size < filesystem[i].size) {
-                // Shrinks the file
-                int new_blocks_needed = (new_size + BLOCK_SIZE - 1) / BLOCK_SIZE; // Calculate number of blocks needed
-                for (int j = new_blocks_needed; j < MAX_POINTERS && filesystem[i].data_blocks[j] != 0; j++) {
-                    free_block(filesystem[i].data_blocks[j]); // Free each block no longer needed
-                    filesystem[i].data_blocks[j] = 0;
+                // Clear data beyond new size within direct data
+                if (new_size < DIRECT_DATA_SIZE) {
+                    memset(filesystem[i].direct_data + new_size, 0, DIRECT_DATA_SIZE - new_size);
                 }
+                // Handle clearing block data if needed
             } else if (new_size > filesystem[i].size) {
-                // Extending the file
-                int current_blocks = (filesystem[i].size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-                int needed_blocks = (new_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-                for (int j = current_blocks; j < needed_blocks; j++) {
-                    int new_block = allocate_block();
-                    if (new_block == -1) return -ENOSPC; // No space left
-                    filesystem[i].data_blocks[j] = new_block;
-                    char* block_data = get_block_data(new_block); // Assuming a function to fetch block data
-                    memset(block_data, 0, BLOCK_SIZE); // Zero out new block
+                // Check if extension is within direct data size
+                if (new_size < DIRECT_DATA_SIZE) {
+                    memset(filesystem[i].direct_data + filesystem[i].size, 0, new_size - filesystem[i].size);
                 }
+                // Optionally handle block data extension
             }
-
-            // Set the new file size
-            filesystem[i].size = new_size;
-
-            // Update the inode modification and change time to the current time
-            time_t now = time(NULL);
-            filesystem[i].mtime = now;
-            filesystem[i].ctime = now;
-
-            return 0; // Success
+            filesystem[i].size = new_size;  // Update file size
+            filesystem[i].mtime = time(NULL);
+            filesystem[i].ctime = time(NULL);
+            return 0;
         }
     }
-
     return -ENOENT; // File not found
 }
-
-
 
 /*
  * This is the only FUSE function that doesn't have a directly corresponding system call, although close(2) is related.
@@ -643,62 +593,38 @@ int dm510fs_release(const char *path, struct fuse_file_info *fi) {
  * value provided to fuse_main() / fuse_new().
  */
 void* dm510fs_init() {
-    printf("init filesystem\n");
     FILE *fp = fopen(FS_STATE_FILE, "rb");
     if (fp) {
-        // File exists, load state
+        // Existing file system state found, load it
         printf("Loading existing filesystem state.\n");
         fread(filesystem, sizeof(Inode), MAX_INODES, fp);
         fclose(fp);
     } else {
-        // File does not exist, initialize default state
+        // No existing state, initialize a new file system state
         printf("No existing state, initializing new filesystem.\n");
-    
-        // Loop through all inodes - set them inactive
         for (int i = 0; i < MAX_INODES; i++) {
             filesystem[i].is_active = false;
-            memset(filesystem[i].data_blocks, 0, sizeof(filesystem[i].data_blocks)); // Ensure all data blocks are zeroed
         }
-
-        // Initialize root directory inode
+        // Initialize root directory
         filesystem[0].is_active = true;
         filesystem[0].is_dir = true;
         filesystem[0].mode = S_IFDIR | 0755;
         filesystem[0].nlink = 2;
-        strncpy(filesystem[0].path, "/", MAX_PATH_LENGTH);
-
-        // Optionally add a 'hello' file to the filesystem
-        filesystem[1].is_active = true;
-        filesystem[1].is_dir = false;
-        filesystem[1].mode = S_IFREG | 0777;
-        filesystem[1].nlink = 1;
-        filesystem[1].size = 12; // Assuming 'Hello World!' fits within the first block
-        strncpy(filesystem[1].path, "/hello", MAX_PATH_LENGTH);
-        
-        // Allocate initial block for the hello file if necessary
-        int block_index = allocate_block();
-        if (block_index != -1) {
-            filesystem[1].data_blocks[0] = block_index;
-            char* block_data = get_block_data(block_index);
-            if (block_data) {
-                strcpy(block_data, "Hello World!");
-            }
-        }
+        strcpy(filesystem[0].path, "/");
     }
-    return NULL;
+    return NULL; // No specific private data to pass back
 }
-
 
 /**
  * Clean up filesystem
  * Called on filesystem exit.
  */
 void dm510fs_destroy(void *private_data) {
-    printf("destroy filesystem\n");
+    printf("Cleaning up filesystem\n");
     save_fs_state(); // Save the filesystem state to the file
 }
 
 
-int main( int argc, char *argv[] ) {
-	return fuse_main( argc, argv, &dm510fs_oper );
+int main(int argc, char *argv[]) {
+    return fuse_main(argc, argv, &dm510fs_oper);
 }
