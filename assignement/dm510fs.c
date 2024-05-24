@@ -7,7 +7,7 @@
 #include <time.h>
 #include <utime.h>
 #include <sys/types.h>
-#include <ctype.h> // For character manipulation functions - Caesar Cipher Shift
+#include <ctype.h> 
 
 // Filesystem operations declarations
 int dm510fs_getattr(const char *, struct stat *);
@@ -54,7 +54,7 @@ static struct fuse_operations dm510fs_oper = {
 #define MAX_NAME_LENGTH  256
 #define MAX_INODES  4
 #define FS_STATE_FILE "/home/dm510/dm510/linux-6.6.9/kernel/dm510/assignment3/fs_state.dat"
-#define SHIFT_VAL 5 // Shift value for Caesar Cipher
+#define SHIFT_VAL 5           // Shift value for Caesar Cipher
 #define DIRECT_DATA_SIZE 128  // Size of direct data area in bytes
 #define NUM_POINTERS 10       // Number of pointers to data blocks
 #define BLOCK_SIZE 4096       // Assuming a block size of 4KB
@@ -65,13 +65,17 @@ static struct fuse_operations dm510fs_oper = {
 // Global array to simulate disk blocks
 char data_blocks[MAX_BLOCKS][BLOCK_SIZE];
 
+// Global array to track usage of data blocks
+bool block_usage[MAX_BLOCKS];  // true if block is in use, false if available
+
+
 /* The Inode for the filesystem*/
 typedef struct Inode {
 	bool is_active;     // Indicates whether the indoe is in use
 	bool is_dir;        // Indicates whether the indoe is a directory
-        char direct_data[DIRECT_DATA_SIZE]; // Directly stored data within the inode
-        int data_block_pointers[NUM_POINTERS]; // Pointers to data blocks
-        char name[MAX_NAME_LENGTH]; // Name of the file/directory
+    char direct_data[DIRECT_DATA_SIZE]; // Directly stored data within the inode
+    int data_block_pointers[NUM_POINTERS]; // Pointers to data blocks
+    char name[MAX_NAME_LENGTH]; // Name of the file/directory
 	size_t size;        // Total size of the file
 	mode_t mode;        // Specify the file type and permissions
 	nlink_t nlink;      // The link count
@@ -150,6 +154,28 @@ bool is_directory_empty(const Inode *dir) {
     }
     return true;
 }
+
+// Function to allocate 
+int allocate_data_block() {
+    for (int i = 0; i < MAX_BLOCKS; i++) {
+        if (!block_usage[i]) {
+            block_usage[i] = true;
+            return i;
+        }
+    }
+    return -1; // No free blocks available
+}
+
+// Function to find free pointer
+int find_free_pointer(int pointers[], int num_pointers) {
+    for (int i = 0; i < num_pointers; i++) {
+        if (pointers[i] == -1) { // -1 signifies an unused pointer
+            return i;
+        }
+    }
+    return -1; // No free pointer slots available
+}
+
 
 void save_fs_state() {
     FILE *fp = fopen(FS_STATE_FILE, "wb");
@@ -327,16 +353,15 @@ int dm510fs_read(const char *path, char *buf, size_t size, off_t offset, struct 
 
             // Decrypt data after reading it from the filesystem
             caesar_decrypt(buf - bytes_read, bytes_read);
-
             printf("Decrypted message: %.*s\n", (int)bytes_read, buf - bytes_read);
-
             return bytes_read; // Return the actual number of bytes read
         }
     }
     return -ENOENT; // File not found
 }
 
-// Writes data to a file
+
+
 int dm510fs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
     if (size == 0) return 0;  // No data to write
 
@@ -370,17 +395,36 @@ int dm510fs_write(const char *path, const char *buf, size_t size, off_t offset, 
                 bytes_written += to_write;
             }
 
-            // Update offset for any additional data beyond the direct data area
+            // Handle additional data beyond the direct data area
             size_t remaining_size = size - bytes_written;
             offset += bytes_written;
 
             // Write to additional data blocks if needed and if remaining_size > 0
             while (remaining_size > 0 && offset < MAX_DATA_IN_FILE) {
-                // Handle block-level writing if necessary
-                // This part is left as an exercise to implement block allocation and writing
+                int block_index = allocate_data_block();
+                if (block_index == -1) {
+                    free(encrypted_buf);
+                    return -ENOSPC; // No space left on device
+                }
+
+                // Calculate write size for the block
+                size_t block_write_size = min(remaining_size, BLOCK_SIZE);
+                memcpy(data_blocks[block_index], encrypted_buf + bytes_written, block_write_size);
+
+                // Save the block index in the inode
+                int pointer_index = find_free_pointer(filesystem[i].data_block_pointers, NUM_POINTERS);
+                if (pointer_index == -1) {
+                    free(encrypted_buf);
+                    return -ENOSPC; // No space left for more pointers
+                }
+                filesystem[i].data_block_pointers[pointer_index] = block_index;
+
+                bytes_written += block_write_size;
+                remaining_size -= block_write_size;
+                offset += block_write_size;
             }
 
-            filesystem[i].size = max(filesystem[i].size, offset + remaining_size);
+            filesystem[i].size = max(filesystem[i].size, offset);
             free(encrypted_buf);
             return bytes_written; // Return the number of bytes written
         }
@@ -389,6 +433,7 @@ int dm510fs_write(const char *path, const char *buf, size_t size, off_t offset, 
     free(encrypted_buf);
     return -ENOENT; // File not found
 }
+
 
 /* Make directories - TODO */
 int dm510fs_mkdir(const char *path, mode_t mode) {
@@ -544,7 +589,6 @@ int dm510fs_utime(const char *path, struct utimbuf *ubuf) {
             return 0; // Success
         }
     }
-
     fprintf(stderr, "utime: File not found %s\n", path);
     return -ENOENT; // No such file
 }
